@@ -69,8 +69,10 @@ with the right hand side (*rhs*) in a tree (*tree*) is known as
 "expanding" *lhs* to *rhs* in *tree*.
 """
 import re
-from collections import deque
+from collections import defaultdict, deque
 from functools import total_ordering
+
+import numpy as np
 
 from nltk.featstruct import SLASH, TYPE, FeatDict, FeatStruct, FeatStructReader
 from nltk.internals import raise_unorderable_types
@@ -550,6 +552,8 @@ class CFG:
         )
         return cls(start, productions)
 
+    # TODO merge property of pcfg here
+
     def start(self):
         """
         Return the start symbol of the grammar
@@ -557,6 +561,19 @@ class CFG:
         :rtype: Nonterminal
         """
         return self._start
+
+    @property
+    def _nonterminals(self):
+        """
+        Return nonterminals of this grammar
+        """
+        nts = set()
+        for rule in self.productions():
+            nts.add(rule.lhs())
+            for sym in rule.rhs():
+                if isinstance(sym, Nonterminal):
+                    nts.add(sym)
+        return sorted(nts, key=str)
 
     # tricky to balance readability and efficiency here!
     # can't use set operations as they don't preserve ordering
@@ -722,6 +739,17 @@ class CFG:
         """
         return self._max_len <= 2
 
+    def is_nostart(self):
+        """
+        Return True if the start symbol does not appear in RHS.
+        """
+        for rule in self.productions():
+            if self.start in rule.rhs():
+                return False
+        return True
+
+    # TODO: move _has_circle here
+
     def is_flexible_chomsky_normal_form(self):
         """
         Return True if all productions are of the forms
@@ -734,7 +762,7 @@ class CFG:
         Return True if the grammar is of Chomsky Normal Form, i.e. all productions
         are of the form A -> B C, or A -> "s".
         """
-        return self.is_flexible_chomsky_normal_form() and self._all_unary_are_lexical
+        return self.is_flexible_chomsky_normal_form() and self._all_unary_are_lexical and self.is_nostart()
 
     def chomsky_normal_form(self, new_token_padding="@$@", flexible=False):
         """
@@ -756,7 +784,7 @@ class CFG:
         if flexible:
             return step3
         step4 = CFG.remove_unitary_rules(step3)
-        return CFG(step4.start(), list(set(step4.productions())))
+        return CFG(step4.start, list(set(step4.productions())))
 
     @classmethod
     def remove_unitary_rules(cls, grammar):
@@ -1233,57 +1261,309 @@ class PCFG(CFG):
     ``PCFGs`` impose the constraint that the set of productions with
     any given left-hand-side must have probabilities that sum to 1
     (allowing for a small margin of error).
-
-    If you need efficient key-based access to productions, you can use
-    a subclass to implement it.
-
-    :type EPSILON: float
-    :cvar EPSILON: The acceptable margin of error for checking that
-        productions with a given left-hand side have probabilities
-        that sum to 1.
     """
 
     EPSILON = 0.01
 
     def __init__(self, start, productions, calculate_leftcorners=True):
-        """
-        Create a new context-free grammar, from the given start state
-        and set of ``ProbabilisticProductions``.
-
-        :param start: The start symbol
-        :type start: Nonterminal
-        :param productions: The list of productions that defines the grammar
-        :type productions: list(Production)
-        :raise ValueError: if the set of productions with any left-hand-side
-            do not have probabilities that sum to a value within
-            EPSILON of 1.
-        :param calculate_leftcorners: False if we don't want to calculate the
-            leftcorner relation. In that case, some optimized chart parsers won't work.
-        :type calculate_leftcorners: bool
-        """
         CFG.__init__(self, start, productions, calculate_leftcorners)
 
-        # Make sure that the probabilities sum to one.
         probs = {}
         for production in productions:
             probs[production.lhs()] = probs.get(production.lhs(), 0) + production.prob()
-        for lhs, p in probs.items():
-            if not ((1 - PCFG.EPSILON) < p < (1 + PCFG.EPSILON)):
-                raise ValueError("Productions for %r do not sum to 1" % lhs)
+        for lhs, prob in probs.items():
+            if not ((1 - PCFG.EPSILON) < prob < (1 + PCFG.EPSILON)):
+                raise ValueError('Productions for %r do not sum to 1' % lhs)
+
+    @property
+    def start(self):
+        return self._start
 
     @classmethod
     def fromstring(cls, input, encoding=None):
-        """
-        Return a probabilistic context-free grammar corresponding to the
-        input string(s).
-
-        :param input: a grammar, either in the form of a string or else
-             as a list of strings.
-        """
         start, productions = read_grammar(
-            input, standard_nonterm_parser, probabilistic=True, encoding=encoding
+            input,
+            standard_nonterm_parser,
+            probabilistic=True,
+            encoding=encoding,
         )
         return cls(start, productions)
+
+    def chomsky_normal_form(self, new_token_padding='@$@', flexible=False):
+        """
+        Returns a new Grammar that is in chomsky normal with probabilities
+
+        :param: new_token_padding
+            Customise new rule formation during binarisation
+        """
+        if self.is_chomsky_normal_form():
+            return self
+
+        if self.productions(empty=True):
+            raise ValueError(
+                "Grammar has Empty rules. Cannot deal with them at the moment"
+            )
+
+        step1 = PCFG.eliminate_start(self)
+        step2 = PCFG.binarize(step1, new_token_padding)
+        step3 = PCFG.remove_mixed_rules(step2, new_token_padding)
+        if flexible:
+            return step3
+        step4 = PCFG.remove_unitary_rules(step3)
+        return step4
+
+    @classmethod
+    def eliminate_start(cls, grammar):
+        """
+        Eliminate start rule in case it appears on RHS
+        Example: S -> S0 S1 [1.0] and S0 -> S1 S [0.5]
+        Then another rule S0_Sigma -> S [1.0] is added
+        """
+        start = grammar.start
+        result = []
+        need_to_add = None
+
+        for rule in grammar.productions():
+            if start in rule.rhs():
+                need_to_add = True
+            result.append(rule)
+        if need_to_add:
+            start = Nonterminal('S0_SIGMA')
+            result.append(
+                ProbabilisticProduction(start, [grammar.start], prob=1.0)
+            )
+            n_grammar = PCFG(start, result)
+            return n_grammar
+        return grammar
+
+    @classmethod
+    def binarize(cls, grammar, padding='@$@'):
+        """
+        Convert all non-binary rules into binary by introducing
+        new tokens.
+        Example::
+
+            Original:
+                A => B C D [0.5]
+            After Conversion:
+                A => B A@$@B [0.5]
+                A@$@B => C D [1.0]
+        """
+        result = []
+
+        for rule in grammar.productions():
+            if len(rule.rhs()) > 2:
+                left_side = rule.lhs()
+
+                for k in range(0, len(rule.rhs()) - 2):
+                    tsym = rule.rhs()[k]
+                    new_sym = Nonterminal(left_side.symbol() + padding + tsym.symbol())
+                    new_production = ProbabilisticProduction(
+                        left_side,
+                        (tsym, new_sym),
+                        prob=rule.prob(),
+                    )
+                    left_side = new_sym
+                    result.append(new_production)
+                last_prd = ProbabilisticProduction(
+                    left_side,
+                    rule.rhs()[-2:],
+                    prob=1.0,
+                )
+                result.append(last_prd)
+            else:
+                result.append(rule)
+
+        n_grammar = PCFG(grammar.start, result)
+        return n_grammar
+
+    @classmethod
+    def remove_mixed_rules(cls, grammar, padding='@$@'):
+        """
+        Convert all mixed rules containing terminals and non-terminals
+        into dummy non-terminals.
+        Example::
+
+            Original:
+                A => term B [0.5]
+            After Conversion:
+                A => TERM@$@TERM B [0.5]
+                TERM@$@TERM => term [1.0]
+        """
+        result = []
+        dummy_nonterms = {}
+        for rule in grammar.productions():
+            if not rule.is_lexical() or len(rule.rhs()) <= 1:
+                result.append(rule)
+                continue
+
+            new_rhs = []
+            for item in rule.rhs():
+                if is_nonterminal(item):
+                    new_rhs.append(item)
+                else:
+                    if item not in dummy_nonterms:
+                        sanitized_term = ''.join(
+                            _STANDARD_NONTERM_RE.findall(item.upper())
+                        )
+                        dummy_nonterm_symbol = (
+                            f'{sanitized_term}{padding}{sanitized_term}'
+                        )
+                        dummy_nonterms[item] = Nonterminal(dummy_nonterm_symbol)
+
+                    new_rhs.append(dummy_nonterms[item])
+                    result.append(
+                        ProbabilisticProduction(
+                            dummy_nonterms[item],
+                            rhs=[item],
+                            prob=1.0,
+                        )
+                    )
+
+            result.append(
+                ProbabilisticProduction(
+                    rule.lhs(),
+                    new_rhs,
+                    prob=rule.prob(),
+                )
+            )
+
+        n_grammar = PCFG(grammar.start, result)
+        return n_grammar
+
+    @classmethod
+    def _find_circle(cls, grammar):
+        """Find if the grammar contains any circle."""
+        reachable = set()
+        frontier = []
+
+        # find first rule
+        # TODO: unify properties, with or without '()'
+        for prod in grammar.productions():
+            pass
+
+    @classmethod
+    def remove_unitary_rules(cls, grammar):
+        """
+        Remove nonlexical unitary rules and convert them to
+        lexical
+
+        Example::
+
+            Original:
+                A => B [0.5] | B C [0.5]
+                B => C [0.5] | B C [0.5]
+            After Conversion:
+                A => C [0.25] | B C [0.75]
+                B => B C [1.0]
+        """
+        # for each non-unary RHS epsilon
+        # solve (I - P) x = b_epsilon
+        # P: unary-transition matrix
+        # b_epsilon: direct prob of reaching epsilon in one step
+
+        # build symbols
+        nonterminals = grammar._nonterminals
+        nt_to_idx = {nt: i for i, nt in enumerate(nonterminals)}
+
+        unary_prob = np.zeros((len(nonterminals), len(nonterminals)),
+                              dtype=float)
+        direct_prob_by_rhs = defaultdict(lambda: np.zeros(len(nonterminals),
+                                                          dtype=float))
+
+        # split rules into unary vs non-unary targets
+        for rule in grammar.productions():
+            lhs = rule.lhs()
+            rhs = rule.rhs()
+
+            if len(rhs) == 1 and isinstance(rhs[0], Nonterminal) and rule.is_nonlexical():
+                unary_prob[nt_to_idx[lhs], nt_to_idx[rhs[0]]] += float(rule.prob())
+            else:
+                direct_prob_by_rhs[rhs][nt_to_idx[lhs]] += float(rule.prob())
+
+        # Solve one linear system per non-unary RHS.
+        # x_rhs[A] = total probability of all unary chains from A
+        #            eventually ending in this RHS.
+        identity = np.eye(len(nonterminals), dtype=float)
+        system = identity - unary_prob
+
+        result = []
+        for rhs, b in direct_prob_by_rhs.items():
+            x = np.linalg.solve(system, b)
+            for lhs, idx in nt_to_idx.items():
+                prob = x[idx]
+                if prob > 0.0:
+                    result.append(
+                        ProbabilisticProduction(lhs, rhs, prob=prob)
+                    )
+
+        from IPython import embed; embed()
+
+        # TODO: should include two-RHSes as unique states
+
+        result = cls._merge_duplicate_productions(grammar.start, result)
+        result = cls._renormalize_by_lhs(grammar.start, result)
+
+        # TODO: remove unreachable?
+
+        return result
+
+    @classmethod
+    def _merge_duplicate_productions(cls, start, productions):
+        """
+        Merge probabilities of productions with the same LHSes and RHSes.
+        """
+        merged = defaultdict(float)
+        for production in productions:
+            key = (production.lhs(), production.rhs())
+            merged[key] += float(production.prob())
+
+        result = [
+            ProbabilisticProduction(lhs, rhs, prob=prob)
+            for (lhs, rhs), prob in merged.items()
+            if prob > 0.0
+        ]
+        return PCFG(start, result)
+
+    # TODO: remove atol and use class atol?
+    @classmethod
+    def _renormalize_by_lhs(cls, start, grammar_or_productions, atol=1e-12):
+        """
+        Normalize RHS probs for each LHS to sum up to 1.
+        """
+        if isinstance(grammar_or_productions, PCFG):
+            productions = grammar_or_productions.productions()
+        else:
+            productions = grammar_or_productions
+
+        by_lhs = defaultdict(list)
+        for rule in productions:
+            by_lhs[rule.lhs()].append(rule)
+
+        result = []
+        for lhs, rules in by_lhs.items():
+            total = sum(float(rule.prob()) for rule in rules)
+            if total <= 0.0:
+                continue
+
+            for rule in rules:
+                prob = float(rule.prob()) / total
+                if prob > atol:
+                    result.append(
+                        ProbabilisticProduction(lhs, rule.rhs(), prob=prob)
+                    )
+
+        return PCFG(start, result)
+
+    @classmethod
+    def _is_prob_normalized(cls, grammar, atol=1e-6):
+        """
+        Helper function to check if for every symbol, the probabilities of its productions summing up to 1.
+        """
+        by_lhs = defaultdict(float)
+        for prod in grammar.productions():
+            by_lhs[prod.lhs()] += float(prod.prob())
+        return all(abs(total - 1.0) <= atol for total in by_lhs.values())
 
 
 #################################################################
@@ -1427,7 +1707,7 @@ def _read_production(line, nonterm_parser, probabilistic=False):
 def read_grammar(input, nonterm_parser, probabilistic=False, encoding=None):
     """
     Return a pair consisting of a starting category and a list of
-    ``Productions``.
+    ``Productions``. The starting category is default to the symbol named 'start', or the LHS of the first production of input.
 
     :param input: a grammar, either in the form of a string or else
         as a list of strings.

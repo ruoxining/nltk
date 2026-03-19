@@ -27,20 +27,6 @@ Grammars can be parsed from strings:
     Det -> 'a', Det -> 'the', N -> 'dog', N -> 'cat', V -> 'chased', V -> 'sat',
     P -> 'on', P -> 'in']
 
-Probabilistic CFGs:
-
-    >>> from nltk import PCFG
-    >>> toy_pcfg1 = PCFG.fromstring("""
-    ... S -> NP VP [1.0]
-    ... NP -> Det N [0.5] | NP PP [0.25] | 'John' [0.1] | 'I' [0.15]
-    ... Det -> 'the' [0.8] | 'my' [0.2]
-    ... N -> 'man' [0.5] | 'telescope' [0.5]
-    ... VP -> VP PP [0.1] | V NP [0.7] | V [0.2]
-    ... V -> 'ate' [0.35] | 'saw' [0.65]
-    ... PP -> P NP [1.0]
-    ... P -> 'with' [0.61] | 'under' [0.39]
-    ... """)
-
 Chomsky Normal Form grammar (Test for bug 474)
 
     >>> g = CFG.fromstring("VP^<TOP> -> VBP NP^<VP-TOP>")
@@ -86,3 +72,135 @@ Grammars with mixed rules can be converted into Chomsky Normal Form:
     <Grammar with 15 productions>
     >>> grammar.chomsky_normal_form()
     <Grammar with 18 productions>
+
+
+Probabilistic CFGs can be parsed from string:
+
+    >>> from nltk import PCFG
+    >>> pcfg = PCFG.fromstring("""
+    ... S -> NP VP [1.0]
+    ... NP -> Det N [0.5] | NP PP [0.25] | 'John' [0.1] | 'I' [0.15]
+    ... Det -> 'the' [0.8] | 'my' [0.2]
+    ... N -> 'man' [0.5] | 'telescope' [0.5]
+    ... VP -> VP PP [0.1] | V NP [0.7] | V [0.2]
+    ... V -> 'ate' [0.35] | 'saw' [0.65]
+    ... PP -> P NP [1.0]
+    ... P -> 'with' [0.61] | 'under' [0.39]
+    ... """)
+    >>> pcfg
+    <Grammar with 17 productions>
+    >>> pcfg.start()
+    S
+    >>> pcfg.productions()
+    [S -> NP VP [1.0], NP -> Det N [0.5], NP -> NP PP [0.25], NP -> 'John' [0.1], NP -> 'I' [0.15], Det -> 'the' [0.8], Det -> 'my' [0.2], N -> 'man' [0.5], N -> 'telescope' [0.5], VP -> VP PP [0.1], VP -> V NP [0.7], VP -> V [0.2], V -> 'ate' [0.35], V -> 'saw' [0.65], PP -> P NP [1.0], P -> 'with' [0.61], P -> 'under' [0.39]]
+
+
+Probabilistic CFG with padding symbol generated during non-binary RHSes removal can be converted into Chomsky normal form:
+
+    >>> from nltk import PCFG
+    >>> grammar = PCFG.fromstring("""
+    ... S@$@A -> S A [1.0]
+    ... S -> 's' [1.0]
+    ... A -> 'a' [1.0]
+    ... """)
+    >>> grammar
+    <Grammar with 3 productions>
+    >>> grammar.productions()
+    [S@$@A -> S A [1.0], S -> 's' [1.0], A -> 'a' [1.0]]
+
+
+Probablistic CFGs with starting symbols on RHS can be converted into Chomsky normal form:
+
+    >>> from nltk import PCFG
+    >>> pcfg = PCFG.fromstring("""
+    ... S -> A S [1.0]
+    ... """)
+    >> pcfg.chomsky_normal_form().start()
+    S0_SIGMA
+    >> pcfg.chomsky_normal_form().productions()
+    [S0_SIGMA -> A S [1.0], S -> A S [1.0]]
+
+
+Probablistic CFGs with unitary rules can be converted into Chomsky normal form:
+
+    >>> from nltk import PCFG
+    >>> pcfg = PCFG.fromstring("""
+    ... A -> B [0.3] | B C [0.7]
+    ... B -> C [0.4] | B C [0.6]
+    ... C -> 'c' [0.5] | 'd' [0.5]
+    ... """)
+    >>> pcfg
+    <Grammar with 7 productions>
+    >>> pcfg.chomsky_normal_form()
+    <Grammar with 8 productions>
+    >>> grammar._is_prob_normalized()
+    True
+    >>> for production in grammar.productions(lhs='A'):
+    ...     if set(production.rhs()) == set(['B', 'C']):
+    ...         assert production.prob() == 0.88
+    >>> for production in grammar.productions(lhs='A'):
+    ...     if set(production.rhs()) == set(['c']):
+    ...         assert production.prob() == 0.06
+    >>> for production in grammar.productions(lhs='A'):
+    ...     if set(production.rhs()) == set(['d']):
+    ...         assert production.prob() == 0.06
+
+
+Probablistic CFGs with non-binary RHSes can be converted into Chomsky normal form:
+
+    >>> from nltk import PCFG
+    >>> grammar = PCFG.fromstring("""
+    ... S -> NP VP P [0.3] | N V [0.7]
+    ... V -> V N P [0.3] | N V [0.3] | 'v' [0.4]
+    ... N -> 'n' [1.0]
+    ... P -> 'p' [1.0]
+    ... """)
+    >>> grammar
+    <Grammar with 7 productions>
+    >>> grammar.chomsky_normal_form()
+    <Grammar with 9 productions>
+    >>> grammar._is_prob_normalized()
+    True
+
+
+Mixed lexical and nonlexical rules can be converted to CNF:
+
+    >>> from nltk import PCFG
+    >>> grammar = PCFG.fromstring("""
+    ... S -> 'a' B [1.0]
+    ... B -> 'b' [1.0]
+    ... """)
+    >>> cnf = grammar.chomsky_normal_form()
+    >>> cnf
+    <Grammar with 3 productions>
+    >>> any(prod.lhs().symbol().endswith('@$@A') or '@$@' in prod.lhs().symbol()
+    ...     for prod in cnf.productions())
+    True
+    >>> for prod in cnf.productions(lhs=cnf.start()):
+    ...     assert len(prod.rhs()) == 2
+
+
+Probabilistic CFGs with unary cycles can be converted into Chomsky Normal Form by solving unary hitting probabilities:
+
+    >>> from nltk import PCFG, Nonterminal
+    >>> grammar = PCFG.fromstring("""
+    ... S -> A [1.0]
+    ... A -> B [0.5] | 'a' [0.5]
+    ... B -> A [0.5] | 'b' [0.5]
+    ... """)
+    >>> cnf = grammar.chomsky_normal_form()
+    >>> cnf.productions()
+    [A -> 'a' [0.666667], A -> 'b' [0.333333], B -> 'a' [0.333333], B -> 'b' [0.666667], S -> 'a' [0.666667], S -> 'b' [0.333333]]
+
+    >>> # TODO: decide if need to remove unreachable rules
+
+
+Probabilistic CFGs with non-unitary circles can be converted into Chomsky Normal Form:
+
+    >>> from nltk import PCFG, Nonterminal
+    >>> grammar = PCFG.fromstring("""
+    ... S -> A B [0.4] | B A [0.6]
+    ... A -> a [1.0]
+    ... B -> A B [0.2] | b [0.8]
+    """)
+    >>> cnf = grammar.chomsky_normal_form().productions()
